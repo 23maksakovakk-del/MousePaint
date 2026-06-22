@@ -1,0 +1,113 @@
+// mouse_paint.go - Рисовалка с мышкой на Go (веб-сервер)
+package main
+
+import (
+	"encoding/base64"
+	"fmt"
+	"io/ioutil"
+	"log"
+	"net/http"
+	"strings"
+)
+
+func main() {
+	http.HandleFunc("/", indexHandler)
+	http.HandleFunc("/save", saveHandler)
+	log.Println("Сервер запущен на http://localhost:8080")
+	log.Fatal(http.ListenAndServe(":8080", nil))
+}
+
+func indexHandler(w http.ResponseWriter, r *http.Request) {
+	html := `<!DOCTYPE html>
+<html><head><meta charset="UTF-8"><title>🖌️ MousePaint - Go</title>
+<style>body{font-family:sans-serif;background:#2c3e50;display:flex;justify-content:center;align-items:center;min-height:100vh;margin:0;}
+.container{background:#ecf0f1;padding:20px;border-radius:16px;box-shadow:0 10px 30px rgba(0,0,0,0.3);}
+.toolbar{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:12px;align-items:center;}
+.toolbar button{padding:6px 12px;border:none;border-radius:6px;background:#3498db;color:white;cursor:pointer;}
+.toolbar button:hover{background:#2980b9;}
+.toolbar input[type="color"]{width:40px;height:40px;border:none;cursor:pointer;}
+.toolbar input[type="range"]{width:100px;}
+canvas{border:2px solid #bdc3c7;border-radius:8px;cursor:crosshair;background:white;}
+.status{margin-top:10px;display:flex;justify-content:space-between;font-size:14px;color:#2c3e50;}
+</style></head>
+<body>
+<div class="container">
+<h2>🖌️ MousePaint · Go</h2>
+<div class="toolbar">
+<button onclick="setTool('brush')">🖌️ Кисть</button>
+<button onclick="setTool('eraser')">🧽 Ластик</button>
+<input type="color" id="colorPicker" value="#000000">
+<label>Толщина: <input type="range" id="sizeSlider" min="1" max="20" value="5"></label>
+<button onclick="undo()">↩️ Отменить</button>
+<button onclick="redo()">↪️ Повторить</button>
+<button onclick="clearCanvas()">🗑️ Очистить</button>
+<button onclick="saveImage()">💾 Сохранить</button>
+</div>
+<canvas id="canvas" width="800" height="600"></canvas>
+<div class="status"><span>Инструмент: <span id="toolDisplay">Кисть</span></span><span>Размер: <span id="sizeDisplay">5</span></span></div>
+</div>
+<script>
+const canvas=document.getElementById('canvas');
+const ctx=canvas.getContext('2d');
+const colorPicker=document.getElementById('colorPicker');
+const sizeSlider=document.getElementById('sizeSlider');
+let isDrawing=false,lastX=0,lastY=0,tool='brush',color='#000000',size=5;
+let undoStack=[],redoStack=[],MAX_UNDO=20;
+
+function init(){ ctx.fillStyle='#ffffff'; ctx.fillRect(0,0,canvas.width,canvas.height); pushUndo(); updateDisplay(); }
+function pushUndo(){ undoStack.push(canvas.toDataURL()); if(undoStack.length>MAX_UNDO) undoStack.shift(); redoStack=[]; }
+function restoreFromDataURL(data){ let img=new Image(); img.onload=()=>{ ctx.clearRect(0,0,canvas.width,canvas.height); ctx.drawImage(img,0,0); }; img.src=data; }
+function undo(){ if(undoStack.length<2)return; redoStack.push(undoStack.pop()); restoreFromDataURL(undoStack[undoStack.length-1]); }
+function redo(){ if(redoStack.length===0)return; let data=redoStack.pop(); undoStack.push(data); restoreFromDataURL(data); }
+function setTool(t){ tool=t; document.getElementById('toolDisplay').textContent=t==='brush'?'Кисть':'Ластик'; }
+function clearCanvas(){ ctx.fillStyle='#ffffff'; ctx.fillRect(0,0,canvas.width,canvas.height); pushUndo(); }
+function saveImage(){ let link=document.createElement('a'); link.download='drawing.png'; link.href=canvas.toDataURL('image/png'); link.click();
+    let dataURL=canvas.toDataURL('image/png');
+    fetch('/save', {method:'POST', body:'image='+encodeURIComponent(dataURL)});
+}
+function updateDisplay(){ document.getElementById('sizeDisplay').textContent=size; }
+function startDrawing(e){ isDrawing=true; let rect=canvas.getBoundingClientRect(); lastX=e.clientX-rect.left; lastY=e.clientY-rect.top; pushUndo(); }
+function draw(e){ if(!isDrawing)return; let rect=canvas.getBoundingClientRect(); let x=e.clientX-rect.left; let y=e.clientY-rect.top;
+ctx.beginPath(); ctx.moveTo(lastX,lastY); ctx.lineTo(x,y); ctx.strokeStyle=tool==='eraser'?'#ffffff':color; ctx.lineWidth=size; ctx.lineCap='round'; ctx.stroke(); lastX=x; lastY=y; }
+function stopDrawing(e){ isDrawing=false; pushUndo(); }
+canvas.addEventListener('mousedown',startDrawing);
+canvas.addEventListener('mousemove',draw);
+canvas.addEventListener('mouseup',stopDrawing);
+canvas.addEventListener('mouseleave',stopDrawing);
+colorPicker.oninput=(e)=>{ color=e.target.value; };
+sizeSlider.oninput=(e)=>{ size=parseInt(e.target.value); updateDisplay(); };
+init();
+</script>
+</body></html>`
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	fmt.Fprint(w, html)
+}
+
+func saveHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	body, err := ioutil.ReadAll(r.Body)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	data := string(body)
+	if strings.HasPrefix(data, "image=data:image/png;base64,") {
+		encoded := strings.TrimPrefix(data, "image=data:image/png;base64,")
+		decoded, err := base64.StdEncoding.DecodeString(encoded)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		err = ioutil.WriteFile("drawing.png", decoded, 0644)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		fmt.Fprint(w, "ok")
+	} else {
+		http.Error(w, "Invalid format", http.StatusBadRequest)
+	}
+}
